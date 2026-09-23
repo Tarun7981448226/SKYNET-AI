@@ -1,0 +1,9 @@
+name = "skynet-share-bot-webhook"
+main = "src/index.ts"
+compatibility_date = "2024-09-01"
+
+# Secrets (never put real values here — set via `wrangler secret put <NAME>`):
+#   DATABASE_URL            — same Neon connection string as the Python side
+#   TELEGRAM_OWNER_CHAT_ID  — your Telegram chat id, matches .env
+#   TELEGRAM_WEBHOOK_SECRET — a random string you make up; also passed to
+#                             Telegram's setWebhook call as secret_token

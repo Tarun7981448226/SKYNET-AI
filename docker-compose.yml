@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: skynet
+      POSTGRES_PASSWORD: skynet
+      POSTGRES_DB: skynet
+    ports:
+      # host 5433 -> container 5432: this machine already has a native
+      # Postgres bound to host 5432, so we publish on 5433 instead to avoid
+      # colliding with it. Containers on the compose network still reach
+      # this one at postgres:5432.
+      - "5433:5432"
+    volumes:
+      - skynet_pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+
+volumes:
+  skynet_pgdata:

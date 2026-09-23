@@ -1,0 +1,143 @@
+name: SKYNET hourly pipeline
+
+# Runs the full ingest -> parse -> score -> tailor -> render -> log cycle
+# every hour, replacing the Mark IV VM daemon's APScheduler jobs. Each run
+# is a fresh, ephemeral container — no persistent server, no SSH exposed,
+# no VM to pay for or patch.
+on:
+  schedule:
+    - cron: "0 * * * *" # every hour, UTC
+  workflow_dispatch:
+    inputs:
+      min_score:
+        description: "Override the tailor min-score threshold for this manual run only (e.g. 0, to force-test the tailor->render->Drive->Sheets path end to end)"
+        required: false
+        default: "50"
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+  TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+  TELEGRAM_SESSION_NAME: skynet
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_JOB_CHANNELS: ${{ secrets.TELEGRAM_JOB_CHANNELS }}
+  TELEGRAM_OWNER_CHAT_ID: ${{ secrets.TELEGRAM_OWNER_CHAT_ID }}
+  TELEGRAM_ALERT_CHAT_ID: ${{ secrets.TELEGRAM_ALERT_CHAT_ID }}
+  GMAIL_CREDENTIALS_PATH: credentials/gmail_oauth.json
+  GMAIL_TOKEN_PATH: credentials/gmail_token.json
+  GMAIL_LINKEDIN_LABEL: LinkedIn Job Alerts
+  GMAIL_LOOKBACK_DAYS: "1" # hourly runs only need a short lookback; re-fetch is idempotent regardless
+  GOOGLE_SHEETS_ID: ${{ secrets.GOOGLE_SHEETS_ID }}
+  GOOGLE_SHEETS_CREDENTIALS_PATH: credentials/sheets_key.json
+  GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+  GREENHOUSE_BOARD_TOKENS: ${{ secrets.GREENHOUSE_BOARD_TOKENS }}
+  LEVER_COMPANY_SLUGS: ${{ secrets.LEVER_COMPANY_SLUGS }}
+  LLM_PROVIDER: gemini
+  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  GEMINI_RATE_LIMIT_RPM: "5"
+  PUSH_NOTIFY_URL: ${{ secrets.PUSH_NOTIFY_URL }}
+  PUSH_NOTIFY_SECRET: ${{ secrets.PUSH_NOTIFY_SECRET }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Tesseract (OCR, for any queued share_bot screenshots)
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr
+
+      - name: Reconstitute credential files from secrets
+        run: |
+          mkdir -p credentials data
+          printf '%s' "$GMAIL_OAUTH_JSON" > credentials/gmail_oauth.json
+          printf '%s' "$GMAIL_TOKEN_JSON" > credentials/gmail_token.json
+          printf '%s' "$SHEETS_KEY_JSON" > credentials/sheets_key.json
+          printf '%s' "$DRIVE_TOKEN_JSON" > credentials/drive_token.json
+          printf '%s' "$TELETHON_SESSION_B64" | base64 -d > skynet.session
+          printf '%s' "$RESUME_AIML_MD" > data/resume_aiml.md
+          printf '%s' "$RESUME_SWE_MD" > data/resume_swe.md
+        env:
+          GMAIL_OAUTH_JSON: ${{ secrets.GMAIL_OAUTH_JSON }}
+          GMAIL_TOKEN_JSON: ${{ secrets.GMAIL_TOKEN_JSON }}
+          SHEETS_KEY_JSON: ${{ secrets.SHEETS_KEY_JSON }}
+          DRIVE_TOKEN_JSON: ${{ secrets.DRIVE_TOKEN_JSON }}
+          TELETHON_SESSION_B64: ${{ secrets.TELETHON_SESSION_B64 }}
+          RESUME_AIML_MD: ${{ secrets.RESUME_AIML_MD }}
+          RESUME_SWE_MD: ${{ secrets.RESUME_SWE_MD }}
+
+      # Each source is its own step (not one shell block) so a hang in one
+      # (seen with Greenhouse — a single request slips past requests'
+      # per-call timeout, and repeatedly in live runs past every internal
+      # timeout mechanism tried so far too — likely GH-runner-specific
+      # thread/GIL starvation, never reproduced locally) can't block the
+      # others from ever running. Each gets its own short cap;
+      # continue-on-error means a timeout or failure here just moves on to
+      # the next source. Greenhouse's cap is intentionally tighter than the
+      # others (a healthy run finishes in ~1-2s) so an unlucky hang wastes
+      # 1 minute of the run's budget instead of 3.
+      - name: Ingest greenhouse
+        continue-on-error: true
+        timeout-minutes: 1
+        run: python -m backend.cli ingest --source greenhouse
+
+      - name: Ingest lever
+        continue-on-error: true
+        timeout-minutes: 3
+        run: python -m backend.cli ingest --source lever
+
+      - name: Ingest telegram
+        continue-on-error: true
+        timeout-minutes: 3
+        run: python -m backend.cli ingest --source telegram
+
+      - name: Ingest gmail_linkedin
+        continue-on-error: true
+        timeout-minutes: 3
+        run: python -m backend.cli ingest --source gmail_linkedin
+
+      - name: Ingest share_bot
+        continue-on-error: true
+        timeout-minutes: 3
+        run: python -m backend.cli ingest --source share_bot
+
+      - name: Parse pending raw posts
+        continue-on-error: true
+        timeout-minutes: 6
+        # 30, not more: at GEMINI_RATE_LIMIT_RPM=5 that's ~6 minutes worst
+        # case, leaving room for tailor below within the 20-min job budget.
+        # A large backlog (like the very first run) drains over several
+        # hourly runs instead of one shot — that's fine for a job monitor.
+        run: python -m backend.cli parse --pending --limit 30
+
+      - name: Score + tailor + render + log
+        continue-on-error: true
+        timeout-minutes: 6
+        run: python -m backend.cli tailor --pending --limit 10 --min-score "${{ inputs.min_score || '50' }}"
+
+      # Frees Drive space for jobs rejected from the Mark V dashboard —
+      # rejecting there just flags the job instantly (jobs.user_decision);
+      # this hourly step is what actually trashes the Drive file (moved to
+      # trash, not permanently deleted — recoverable there for ~30 days).
+      - name: Clean up rejected jobs' Drive files
+        continue-on-error: true
+        timeout-minutes: 3
+        run: python -m backend.cli jobs cleanup-rejected --limit 20
+
+      - name: Upload generated resumes (temporary — see note on Drive upload)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resumes-${{ github.run_id }}
+          path: resumes/
+          if-no-files-found: ignore
+          retention-days: 90

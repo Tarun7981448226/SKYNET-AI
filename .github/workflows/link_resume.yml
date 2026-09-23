@@ -1,0 +1,70 @@
+name: On-demand link resume
+
+# Triggered by the dashboard's "paste a link" feature
+# (frontend/app/api/dashboard/link-resume/route.ts calling GitHub's
+# workflow_dispatch REST API the moment Tarun submits a URL) instead of
+# waiting for the hourly pipeline.yml cron — a single job posting gets the
+# full scrape -> parse -> score -> tailor -> render -> Drive upload ->
+# WhatsApp send treatment on demand.
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "Job posting URL pasted from the dashboard"
+        required: true
+      request_id:
+        description: "link_resume_requests.id to update with the result"
+        required: true
+
+env:
+  DATABASE_URL: ${{ secrets.DATABASE_URL }}
+  GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+  LLM_PROVIDER: gemini
+  GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+  GEMINI_RATE_LIMIT_RPM: "5"
+  # TEMPORARY (2026-09-23): delivery is standing in with Telegram (see
+  # backend/app/telegram_delivery.py) while a Meta account device-trust
+  # hold blocks WhatsApp Cloud API app creation. These two are the same
+  # secrets pipeline.yml's Telegram alerts already use. The WHATSAPP_* vars
+  # below stay wired for when that swap reverts.
+  TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+  TELEGRAM_OWNER_CHAT_ID: ${{ secrets.TELEGRAM_OWNER_CHAT_ID }}
+  WHATSAPP_ACCESS_TOKEN: ${{ secrets.WHATSAPP_ACCESS_TOKEN }}
+  WHATSAPP_PHONE_NUMBER_ID: ${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}
+  WHATSAPP_RECIPIENT_NUMBER: ${{ secrets.WHATSAPP_RECIPIENT_NUMBER }}
+  PUSH_NOTIFY_URL: ${{ secrets.PUSH_NOTIFY_URL }}
+  PUSH_NOTIFY_SECRET: ${{ secrets.PUSH_NOTIFY_SECRET }}
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    # A single on-demand link, not the full multi-source hourly pipeline —
+    # should finish in well under a minute of real work; generous headroom
+    # for a slow target site or LLM call, not for a full pipeline run.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Reconstitute credential files from secrets
+        run: |
+          mkdir -p credentials data
+          printf '%s' "$GMAIL_OAUTH_JSON" > credentials/gmail_oauth.json
+          printf '%s' "$DRIVE_TOKEN_JSON" > credentials/drive_token.json
+          printf '%s' "$RESUME_AIML_MD" > data/resume_aiml.md
+          printf '%s' "$RESUME_SWE_MD" > data/resume_swe.md
+        env:
+          GMAIL_OAUTH_JSON: ${{ secrets.GMAIL_OAUTH_JSON }}
+          DRIVE_TOKEN_JSON: ${{ secrets.DRIVE_TOKEN_JSON }}
+          RESUME_AIML_MD: ${{ secrets.RESUME_AIML_MD }}
+          RESUME_SWE_MD: ${{ secrets.RESUME_SWE_MD }}
+
+      - name: Process the pasted link
+        run: python -m backend.cli link-resume --url "${{ inputs.url }}" --request-id "${{ inputs.request_id }}"

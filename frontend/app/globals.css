@@ -1,0 +1,197 @@
+@import "tailwindcss";
+
+/* SKYNET commits to one dark, cinematic look regardless of OS theme —
+   this isn't a light/dark-adaptive app, it's a themed console UI. */
+:root {
+  --background: #05070d;
+  --foreground: #f2f4f8;
+  --glass-bg: rgba(15, 15, 25, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glow-primary: rgba(56, 189, 248, 0.55); /* cyan/blue, matches wallpaper glow */
+  --glow-danger: rgba(248, 113, 113, 0.5); /* warm, for reject/destructive */
+  --scrim: rgba(0, 0, 0, 0.32);
+  /* "Hot Rod Red" — the color Jarvis picks for Tony's armor after silver
+     doesn't test well in Iron Man 2. Used for the SKYNET wordmark. */
+  --hot-rod-red: #e8102a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: "Times New Roman", Times, serif;
+  --font-mono: "Times New Roman", Times, serif;
+}
+
+* {
+  font-family: "Times New Roman", Times, serif;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Times New Roman", Times, serif;
+  letter-spacing: 0.01em;
+}
+
+.glass-panel {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 20px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+.glass-button {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  transition:
+    box-shadow 240ms ease,
+    transform 240ms ease,
+    background 240ms ease;
+}
+
+.glass-button:hover {
+  box-shadow: 0 0 24px var(--glow-primary);
+}
+
+.glass-button--danger:hover {
+  box-shadow: 0 0 24px var(--glow-danger);
+}
+
+.glass-button:active {
+  transform: scale(0.98);
+}
+
+.skynet-title {
+  color: var(--hot-rod-red);
+  text-shadow:
+    0 0 8px rgba(232, 16, 42, 0.85),
+    0 0 22px rgba(232, 16, 42, 0.55),
+    0 0 46px rgba(232, 16, 42, 0.35);
+}
+
+/* The dashboard's voice assistant orb. Primary: a real 3D holographic
+   wireframe sphere (HologramOrb, WebGL via Three.js) — layered rotating
+   wireframe shells + a scattered particle field + a small warm "sun" core,
+   evoking Tony Stark's arc-reactor-room holograms. Small and blue at idle;
+   SiriOrb scales it up (CSS transform) and its color switches to hot-rod-red
+   for any active state (listening/speaking/thinking). Its own color/pulse
+   animation is driven in JS (see HologramOrb.tsx), this just gives the
+   canvas a soft ambient glow so it doesn't look like a bare rectangle
+   floating in the header. Fallback: flat CSS bars (.siri-orb below) for
+   browsers/environments without WebGL. */
+.hologram-orb {
+  cursor: pointer;
+  border-radius: 9999px;
+  filter: drop-shadow(0 0 18px rgba(56, 189, 248, 0.4));
+}
+
+.hologram-orb canvas {
+  display: block;
+}
+
+.siri-orb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 9999px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  transition:
+    box-shadow 240ms ease,
+    transform 240ms ease;
+}
+
+.siri-orb:active {
+  transform: scale(0.96);
+}
+
+.siri-orb__bar {
+  width: 4px;
+  height: 10px;
+  border-radius: 4px;
+  background: var(--foreground);
+  opacity: 0.5;
+  transition:
+    height 160ms ease,
+    opacity 160ms ease,
+    background 160ms ease;
+}
+
+.siri-orb__bar:nth-child(1),
+.siri-orb__bar:nth-child(5) {
+  animation-delay: 0ms;
+}
+.siri-orb__bar:nth-child(2),
+.siri-orb__bar:nth-child(4) {
+  animation-delay: 90ms;
+}
+.siri-orb__bar:nth-child(3) {
+  animation-delay: 180ms;
+}
+
+.siri-orb--listening {
+  box-shadow: 0 0 24px var(--glow-primary);
+}
+.siri-orb--listening .siri-orb__bar {
+  background: var(--glow-primary);
+  opacity: 1;
+  animation: siri-wave 900ms ease-in-out infinite;
+}
+
+.siri-orb--speaking {
+  box-shadow: 0 0 28px var(--hot-rod-red);
+}
+.siri-orb--speaking .siri-orb__bar {
+  background: var(--hot-rod-red);
+  opacity: 1;
+  animation: siri-wave 420ms ease-in-out infinite;
+}
+
+.siri-orb--thinking .siri-orb__bar {
+  background: var(--foreground);
+  opacity: 0.7;
+  animation: siri-pulse 900ms ease-in-out infinite;
+}
+
+@keyframes siri-wave {
+  0%,
+  100% {
+    height: 10px;
+  }
+  50% {
+    height: 28px;
+  }
+}
+
+@keyframes siri-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

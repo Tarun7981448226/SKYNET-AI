@@ -1,0 +1,36 @@
+# secrets
+.env
+credentials/
+*.session
+*.session-journal
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# data
+data/resume.md
+data/resume_*.md
+output/
+resumes/
+backend/logs/
+backend/static/
+
+# node / next.js
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env*.local
+
+# misc
+.DS_Store
+*.log
+
+# AI tooling config — not part of the shipped app
+.claude/
+CLAUDE.md
+frontend/CLAUDE.md
+AGENTS.md
+frontend/AGENTS.md
