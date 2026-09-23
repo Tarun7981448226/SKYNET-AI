@@ -146,12 +146,21 @@ Sheets logging, and serverless 24/7 scheduling (GitHub Actions cron, Drive
 uploads, Telegram alerts, share-intake webhook) all confirmed working end
 to end on real runs, not just fixtures.
 
-Mark V (login + voice assistant + dashboard) is in progress and **live at
-`https://skynet-ten-omega.vercel.app`**: password + WebAuthn login, a 3D
-holographic voice assistant orb (real weather/news/general Q&A +
-commands), a real dashboard (stats, filtered job feed, Apply/Reject, View
-Resume, paste-a-link on-demand resumes) all working against live data, and
-a real 3D EVE on the public landing page with a name-and-options
-conversation flow. Still open: real WhatsApp delivery (Telegram stands in
-for now — see above), and a push-to-talk vocabulary beyond the current
-small command set. See [PRD.md](PRD.md) for the full Marks V–VI roadmap.
+Marks V–VI (login, voice assistant, dashboard, PWA, push notifications)
+are also done and **live at `https://skynet-ten-omega.vercel.app`**:
+password + WebAuthn passkey login, a 3D holographic voice assistant orb
+(weather/news/general Q&A, system commands, a data-driven morning
+briefing spoken on load, spoken job stats, reading a job list aloud and
+acting on a specific item by voice — "mark the second one applied"), a
+real dashboard (stats, filtered job feed, Apply/Reject, View Resume,
+paste-a-link on-demand resumes), a real 3D EVE on the public landing page
+with a name-and-options conversation flow, installable as a PWA, and web
+push notifications the moment a new tailored resume is ready. Still open:
+real WhatsApp delivery (Telegram stands in for now — see above), pending
+a Meta account verification step outside this project's control. See
+[PRD.md](PRD.md) for the full roadmap.
+
+## License
+All rights reserved — see [LICENSE](LICENSE). This code is shared
+publicly for portfolio/demonstration purposes only; no reuse, copying, or
+redistribution is permitted without written permission.
