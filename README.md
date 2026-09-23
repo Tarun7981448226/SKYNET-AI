@@ -1,15 +1,22 @@
 # SKYNET
 
+**Status: Marks I–VI complete** — ingestion, parsing, fit scoring,
+resume tailoring, serverless scheduling, passkey auth, a voice assistant,
+a live dashboard, a PWA, and push notifications are all built and
+live-verified. The only open item is real WhatsApp delivery, blocked on a
+Meta account verification step outside this project's control (Telegram
+stands in for now). See the [Status](#status) section below for detail.
+
 Silicon Valley Job Monitoring AI — a 24/7 agent that ingests job posts,
 parses JDs, scores fit, tailors ATS-safe resumes from a master profile,
 logs to Google Sheets, and shows results on a morning dashboard.
 
 See [PRD.md](PRD.md) for the full architecture and roadmap.
 [DEPLOYMENT_TROUBLESHOOTING.md](DEPLOYMENT_TROUBLESHOOTING.md) is a real
-log of the significant bugs hit across this project — from Mark IV's
-pipeline through the Mark V Vercel deployment — and exactly how each was
-root-caused and fixed. Worth checking before re-diagnosing something that
-might already be documented there.
+log of the significant bugs hit across this project — from the Mark IV
+serverless pipeline through the Mark VI PWA/push work — and exactly how
+each was root-caused and fixed. Worth checking before re-diagnosing
+something that might already be documented there.
 
 ## Quickstart
 ```bash
