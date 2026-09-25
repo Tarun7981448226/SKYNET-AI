@@ -286,8 +286,14 @@ export function SiriOrb({
       // Checked ahead of the clipboard-link command below since both can
       // match on the bare word "tailor" — a company-name command always
       // wins when it successfully extracts a company, since a clipboard
-      // command never names one.
-      const companyResumeCommand = parseCompanyResumeCommand(transcript);
+      // command never names one. This now makes a Gemini call to pull the
+      // company name out reliably (see companyResume.ts), so it's no
+      // longer instant — reflect that in the orb rather than looking
+      // frozen; every branch below this one re-sets state itself, so
+      // setting it here even for a transcript that turns out not to be a
+      // resume command is harmless.
+      setState("thinking");
+      const companyResumeCommand = await parseCompanyResumeCommand(transcript);
       if (companyResumeCommand) {
         await handleCompanyResumeCommand(companyResumeCommand.company, companyResumeCommand.sendTelegram);
         return;

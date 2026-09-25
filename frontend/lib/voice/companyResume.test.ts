@@ -3,36 +3,72 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseCompanyResumeCommand, findJobByCompany, describeCompanyResumeResult } from "./companyResume";
 import type { DashboardJob, LinkResumeRequestStatus } from "@/lib/dashboard/types";
 
+function mockParseCompanyApi(company: string | null) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (typeof url === "string" && url.includes("/api/assistant/parse-company")) {
+        return { ok: true, json: async () => ({ company }) };
+      }
+      throw new Error(`unexpected fetch in this test: ${url}`);
+    }),
+  );
+}
+
 describe("parseCompanyResumeCommand", () => {
-  it("parses a tailor-only command and extracts the company", () => {
-    expect(parseCompanyResumeCommand("tailor the resume for Stripe")).toEqual({
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("parses a tailor-only command using the LLM-extracted company", async () => {
+    mockParseCompanyApi("Stripe");
+    expect(await parseCompanyResumeCommand("tailor the resume for Stripe")).toEqual({
+      company: "Stripe",
+      sendTelegram: false,
+    });
+  });
+
+  it("parses a ready + telegram command", async () => {
+    mockParseCompanyApi("Stripe");
+    expect(await parseCompanyResumeCommand("ready the resume for Stripe and send it to my telegram channel")).toEqual(
+      { company: "Stripe", sendTelegram: true },
+    );
+  });
+
+  it("treats 'linkedin' in a delivery phrase as meaning telegram", async () => {
+    mockParseCompanyApi("Unity");
+    const result = await parseCompanyResumeCommand("ready the resume for Unity and send it to my linkedin");
+    expect(result).toEqual({ company: "Unity", sendTelegram: true });
+  });
+
+  it("defers to the clipboard-link flow when the transcript mentions clipboard/copied", async () => {
+    // Rejected by the synchronous gate before any fetch happens — no mock needed.
+    expect(await parseCompanyResumeCommand("tailor the resume from the link I just copied")).toBeNull();
+  });
+
+  it("returns null without the word 'resume'", async () => {
+    expect(await parseCompanyResumeCommand("tailor Stripe")).toBeNull();
+  });
+
+  it("returns null for an unrelated question", async () => {
+    expect(await parseCompanyResumeCommand("what's the weather")).toBeNull();
+  });
+
+  it("falls back to local extraction when the LLM call fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false })));
+    expect(await parseCompanyResumeCommand("tailor the resume for Stripe")).toEqual({
       company: "stripe",
       sendTelegram: false,
     });
   });
 
-  it("parses a ready + telegram command", () => {
-    expect(parseCompanyResumeCommand("ready the resume for Stripe and send it to my telegram channel")).toEqual({
-      company: "stripe",
-      sendTelegram: true,
-    });
-  });
-
-  it("treats 'linkedin' in a delivery phrase as meaning telegram", () => {
-    const result = parseCompanyResumeCommand("ready the resume for Unity and send it to my linkedin");
-    expect(result).toEqual({ company: "unity", sendTelegram: true });
-  });
-
-  it("defers to the clipboard-link flow when the transcript mentions clipboard/copied", () => {
-    expect(parseCompanyResumeCommand("tailor the resume from the link I just copied")).toBeNull();
-  });
-
-  it("returns null without the word 'resume'", () => {
-    expect(parseCompanyResumeCommand("tailor Stripe")).toBeNull();
-  });
-
-  it("returns null for an unrelated question", () => {
-    expect(parseCompanyResumeCommand("what's the weather")).toBeNull();
+  it("real bug: strips a stray glue word ('ready TO resume' misheard from 'ready THE resume') via the local fallback", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("network down");
+      }),
+    );
+    const result = await parseCompanyResumeCommand("ready to resume for skyworks and send it to my telegram channel");
+    expect(result).toEqual({ company: "skyworks", sendTelegram: true });
   });
 });
 

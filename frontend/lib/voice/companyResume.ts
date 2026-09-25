@@ -16,18 +16,20 @@ const TRIGGER_WORDS = /\b(tailor|ready|generate|prepare)\b/;
 // rather than a literal, unsupported request.
 const DELIVER_WORDS = /\b(telegram|linkedin)\b/;
 
-export function parseCompanyResumeCommand(transcript: string): { company: string; sendTelegram: boolean } | null {
+// Cheap, synchronous gate — decides whether this transcript is even a
+// resume command at all, and which action it wants. Kept as plain regex
+// (unlike company-name extraction below) since presence-checking a handful
+// of fixed words is exactly what regex is reliable at; it's pulling an
+// arbitrary, variable-length company name out of noisy speech-to-text where
+// regex kept breaking.
+function detectCommand(transcript: string): { sendTelegram: boolean } | null {
   const normalized = transcript.trim().toLowerCase();
   // Let the "score the link I just copied" flow handle these instead —
   // it also matches /\btailor\b/, and a clipboard command never mentions
   // a company by name for this parser to extract anyway.
   if (/\b(clipboard|copied)\b/.test(normalized)) return null;
   if (!TRIGGER_WORDS.test(normalized) || !/\bresume\b/.test(normalized)) return null;
-
-  const sendTelegram = DELIVER_WORDS.test(normalized);
-  const company = extractCompanyName(normalized);
-  if (!company) return null;
-  return { company, sendTelegram };
+  return { sendTelegram: DELIVER_WORDS.test(normalized) };
 }
 
 const FILLER_PATTERNS: RegExp[] = [
@@ -44,13 +46,51 @@ const FILLER_PATTERNS: RegExp[] = [
   /\bright away\b/g,
 ];
 
-function extractCompanyName(normalized: string): string | null {
+// Single leftover glue words speech-to-text tends to mishear a nearby word
+// into (e.g. "ready THE resume" heard as "ready TO resume" leaves "to"
+// stuck to the front of the extracted company) — stripped as individual
+// words on top of the phrase-level FILLER_PATTERNS above, which only match
+// exact multi-word phrasing and miss this kind of one-off substitution.
+const STOPWORDS = new Set(["to", "the", "a", "an", "it", "that", "of", "and", "my"]);
+
+// Local fallback only — used when the Gemini-backed extraction below fails
+// outright (no API key, network down). Regex pattern-matching a specific
+// phrase shape is inherently brittle against real speech-to-text noise;
+// this exists so the feature degrades instead of breaking entirely, not as
+// the primary path.
+function extractCompanyNameLocally(normalized: string): string | null {
   let cleaned = normalized;
   for (const pattern of FILLER_PATTERNS) {
     cleaned = cleaned.replace(pattern, " ");
   }
-  cleaned = cleaned.replace(/\s+/g, " ").trim();
-  return cleaned.length > 0 ? cleaned : null;
+  const words = cleaned.split(/\s+/).filter((w) => w && !STOPWORDS.has(w));
+  return words.length > 0 ? words.join(" ") : null;
+}
+
+async function extractCompanyNameViaLLM(transcript: string): Promise<string | null> {
+  try {
+    const res = await fetch("/api/assistant/parse-company", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { company?: string | null };
+    return typeof data.company === "string" && data.company.trim() ? data.company.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function parseCompanyResumeCommand(
+  transcript: string,
+): Promise<{ company: string; sendTelegram: boolean } | null> {
+  const gate = detectCommand(transcript);
+  if (!gate) return null;
+
+  const company = (await extractCompanyNameViaLLM(transcript)) ?? extractCompanyNameLocally(transcript.trim().toLowerCase());
+  if (!company) return null;
+  return { company, sendTelegram: gate.sendTelegram };
 }
 
 async function searchJobs(search: string): Promise<DashboardJob[]> {
@@ -70,7 +110,13 @@ export async function findJobByCompany(company: string): Promise<DashboardJob | 
   // "Robinhood". Try the transcript as heard first, then the words mashed
   // together with no space, then just the first word, stopping at the
   // first attempt that actually finds something.
-  const candidates = Array.from(new Set([company, words.join(""), words[0]].filter((c): c is string => !!c)));
+  // A bare stopword (a leftover glue word the local regex fallback above
+  // failed to strip) is too broad to search on at all — "%to%" would match
+  // almost anything — so it's excluded as a single-word candidate rather
+  // than risk surfacing a wrong job with high confidence, the exact
+  // live-reproduced bug this guards against.
+  const firstWordCandidate = words[0] && !STOPWORDS.has(words[0]) ? words[0] : null;
+  const candidates = Array.from(new Set([company, words.join(""), firstWordCandidate].filter((c): c is string => !!c)));
   for (const candidate of candidates) {
     const jobs = await searchJobs(candidate);
     // Jobs come back newest-first; prefer one with an apply_url (should be
