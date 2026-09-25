@@ -362,6 +362,25 @@ export function SiriOrb({
         shouldListenRef.current = false;
         setState("idle");
         speakText("I can't find a microphone on this device.");
+      } else if (event.error === "network") {
+        // Web Speech recognition sends audio to a remote service even
+        // though it feels local — a blocked/unstable connection (venue
+        // wifi, VPN, firewall) fails here with no other symptom at all:
+        // the orb just sits "listening" forever, never transcribing
+        // anything, and onend's auto-restart below would otherwise retry
+        // into the same wall silently on every timeout. Live-reported as
+        // "the orb is red and not responding" with zero feedback —
+        // surface it instead of failing invisibly.
+        shouldListenRef.current = false;
+        setState("idle");
+        speakText("I'm having trouble reaching the speech service — check your internet connection and click me to try again.");
+      } else {
+        // "no-speech"/"aborted" and similar are expected/benign in
+        // continuous mode (a silence timeout, a legitimate stop() call) —
+        // onend's own restart logic below already recovers from these.
+        // Still logged so a genuinely new silent-failure mode leaves a
+        // trace in the console next time instead of none at all.
+        console.warn("SpeechRecognition error:", event.error);
       }
     };
 
