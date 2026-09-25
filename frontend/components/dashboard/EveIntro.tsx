@@ -45,6 +45,7 @@ export function EveIntro({
   const bobAnim = useRef<Animation | null>(null);
   const armLeftAnim = useRef<Animation | null>(null);
   const armRightAnim = useRef<Animation | null>(null);
+  const enterAnim = useRef<Animation | null>(null);
   const flutterActive = useRef(true);
 
   // Arm flutter: continuous, phase-offset left/right paddle motion for the
@@ -126,6 +127,7 @@ export function EveIntro({
       easing: "cubic-bezier(.35,.05,.25,1)",
       fill: "forwards",
     });
+    enterAnim.current = h;
     h.onfinish = () => onArrived();
     return () => h.cancel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -186,6 +188,12 @@ export function EveIntro({
     if (phase !== "depart") return;
     const root = rootRef.current;
     if (!root || !targetRef.current) return;
+
+    // A click can dismiss her mid-flight, before the enter animation has
+    // finished — cancel it first so this new fly-to-target animation
+    // doesn't run concurrently with it (WAAPI would otherwise composite
+    // both, reading as a visible glitch rather than a clean redirect).
+    enterAnim.current?.cancel();
 
     const rect = targetRef.current.getBoundingClientRect();
     const targetLeft = ((rect.left + rect.width / 2) / window.innerWidth) * 100;

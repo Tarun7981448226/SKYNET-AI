@@ -114,6 +114,10 @@ export function SiriOrb({
   // Tracks the in-flight "score the link I just copied" poll so a second
   // invocation replaces it instead of running two pollers at once.
   const linkPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Set the instant a click dismisses EVE's arrival — guards handleEveArrived
+  // (which can still be mid-flight awaiting the briefing fetch) from
+  // starting the greeting speech after the user already asked to skip it.
+  const introSkippedRef = useRef(false);
 
   function isLikelySelfEcho(transcript: string): boolean {
     const spoken = lastSpokenTextRef.current.toLowerCase();
@@ -379,6 +383,23 @@ export function SiriOrb({
     setWebglSupported(isWebglSupported());
   }, []);
 
+  // A click anywhere on the page while EVE is still flying in / talking
+  // through the arrival greeting cuts it short: stop the reading right
+  // there and send her straight to the orb's spot to become it, instead of
+  // making the visitor sit through the whole briefing every load. Only
+  // live during "enter"/"greet" — once she's departing or already handed
+  // off to the real orb, a normal click should do whatever it normally
+  // does (e.g. the orb's own click-to-listen).
+  useEffect(() => {
+    if (introPhase !== "enter" && introPhase !== "greet") return;
+    function handleGlobalClick() {
+      skipEveGreeting();
+    }
+    document.addEventListener("click", handleGlobalClick);
+    return () => document.removeEventListener("click", handleGlobalClick);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [introPhase]);
+
   useEffect(() => {
     if (attemptedGreeting.current) return;
     attemptedGreeting.current = true;
@@ -484,6 +505,9 @@ export function SiriOrb({
     // running in parallel with EVE's whole flight — so this only adds
     // real latency on an unusually slow network, never on a healthy one.
     greetingTextRef.current = await (briefingPromiseRef.current ?? Promise.resolve(greetingTextRef.current));
+    // A click could have dismissed her while this await was still in
+    // flight — don't start the greeting speech after the fact.
+    if (introSkippedRef.current) return;
     setIntroPhase("greet");
     speakText(greetingTextRef.current, () => setIntroPhase("depart"));
   }
@@ -494,6 +518,22 @@ export function SiriOrb({
 
   function handleEveDeparted() {
     setIntroPhase("done");
+  }
+
+  // Click-anywhere dismissal of the arrival greeting (see the effect
+  // above). Same cancel+finishSpeaking pattern handleOrbClick already uses
+  // to mute mid-sentence — jumping straight to "depart" is what sends her
+  // flying to the orb's spot and popping into it (EveIntro's depart effect
+  // cancels her still-running enter flight first if she was dismissed
+  // before even landing).
+  function skipEveGreeting() {
+    if (introSkippedRef.current || introPhase === "depart" || introPhase === "done") return;
+    introSkippedRef.current = true;
+    cancelSpeech();
+    if (isSpeakingRef.current) {
+      finishSpeaking({ muted: true });
+    }
+    setIntroPhase("depart");
   }
 
   function speakText(text: string, onComplete?: () => void) {
