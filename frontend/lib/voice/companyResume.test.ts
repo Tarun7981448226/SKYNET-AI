@@ -54,6 +54,31 @@ describe("findJobByCompany", () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false })));
     expect(await findJobByCompany("stripe")).toBeNull();
   });
+
+  it("falls back to the words mashed together when speech-to-text splits a one-word company", async () => {
+    // Real bug: "ready the resume for Robin Hood" heard as two words, but
+    // the DB has "Robinhood" (no space) — the first search (for "robin
+    // hood") finds nothing, so it must retry with "robinhood".
+    const job = { id: 1, company: "Robinhood", apply_url: "https://robinhood.com/jobs/1" } as DashboardJob;
+    const fetchMock = vi.fn(async (url: string) => {
+      const search = new URL(url, "http://x").searchParams.get("search");
+      return { ok: true, json: async () => ({ jobs: search === "robinhood" ? [job] : [] }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await findJobByCompany("robin hood")).toEqual(job);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to just the first word as a last resort", async () => {
+    const job = { id: 2, company: "Unity", apply_url: "https://unity.com/jobs/2" } as DashboardJob;
+    const fetchMock = vi.fn(async (url: string) => {
+      const search = new URL(url, "http://x").searchParams.get("search");
+      return { ok: true, json: async () => ({ jobs: search === "unity" ? [job] : [] }) };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await findJobByCompany("unity software")).toEqual(job);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe("describeCompanyResumeResult", () => {

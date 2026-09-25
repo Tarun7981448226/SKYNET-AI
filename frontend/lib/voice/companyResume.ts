@@ -53,15 +53,32 @@ function extractCompanyName(normalized: string): string | null {
   return cleaned.length > 0 ? cleaned : null;
 }
 
-export async function findJobByCompany(company: string): Promise<DashboardJob | null> {
-  const query = new URLSearchParams({ search: company, limit: "5" }).toString();
+async function searchJobs(search: string): Promise<DashboardJob[]> {
+  const query = new URLSearchParams({ search, limit: "5" }).toString();
   const res = await fetch(`/api/dashboard/jobs?${query}`);
-  if (!res.ok) return null;
+  if (!res.ok) return [];
   const data = (await res.json()) as { jobs?: DashboardJob[] };
-  const jobs = data.jobs ?? [];
-  // Jobs come back newest-first; prefer one with an apply_url (should be
-  // all of them, but link-resume needs it to do anything).
-  return jobs.find((j) => !!j.apply_url) ?? null;
+  return data.jobs ?? [];
+}
+
+export async function findJobByCompany(company: string): Promise<DashboardJob | null> {
+  const words = company.split(" ").filter(Boolean);
+  // Speech-to-text splits one-word company names into two ("Robinhood"
+  // heard as "Robin Hood") often enough that the plain search misses a
+  // real, visible-on-the-dashboard job entirely — the DB's `search` param
+  // does a literal substring ilike, so "robin hood" never matches
+  // "Robinhood". Try the transcript as heard first, then the words mashed
+  // together with no space, then just the first word, stopping at the
+  // first attempt that actually finds something.
+  const candidates = Array.from(new Set([company, words.join(""), words[0]].filter((c): c is string => !!c)));
+  for (const candidate of candidates) {
+    const jobs = await searchJobs(candidate);
+    // Jobs come back newest-first; prefer one with an apply_url (should be
+    // all of them, but link-resume needs it to do anything).
+    const match = jobs.find((j) => !!j.apply_url);
+    if (match) return match;
+  }
+  return null;
 }
 
 export function describeCompanyResumeResult(
