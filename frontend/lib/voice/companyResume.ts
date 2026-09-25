@@ -1,13 +1,15 @@
 import type { DashboardJob, LinkResumeRequestStatus } from "@/lib/dashboard/types";
 
-// "Tailor the resume for Stripe" / "ready the resume for Stripe and send it
-// to my telegram channel" — the hands-free way to act on a job Tarun can
-// already see on the dashboard (ingested by a source adapter, not yet
-// tailored) without pasting its URL. Reuses the exact same
-// POST /api/dashboard/link-resume + GET /api/dashboard/link-resume/[id]
-// pair as the manual paste-a-link box and lib/voice/clipboardLink.ts — the
-// only new piece is looking the job's apply_url up by company name first,
-// and a send_telegram=false toggle so "just tailor" doesn't also deliver.
+// Guided "tailor/ready the resume" flow — SiriOrb.tsx drives a short
+// company -> role -> location Q&A instead of trying to parse all three out
+// of one spoken sentence. Trying to extract a variable-length company name
+// out of one free-form sentence kept breaking on real speech-to-text noise
+// in a different shape each time (a one-word company split into two words,
+// a misheard filler word swallowing part of the name); separately, a
+// single company name alone can't disambiguate which job when it has
+// several open roles across different domains/locations (e.g. Skyworks).
+// Three short, isolated answers are both easier for speech-to-text to get
+// right and enough information to pick the exact job — no LLM needed.
 
 const TRIGGER_WORDS = /\b(tailor|ready|generate|prepare)\b/;
 // "linkedin" is included here deliberately: in live use Tarun has said
@@ -16,113 +18,101 @@ const TRIGGER_WORDS = /\b(tailor|ready|generate|prepare)\b/;
 // rather than a literal, unsupported request.
 const DELIVER_WORDS = /\b(telegram|linkedin)\b/;
 
-// Cheap, synchronous gate — decides whether this transcript is even a
-// resume command at all, and which action it wants. Kept as plain regex
-// (unlike company-name extraction below) since presence-checking a handful
-// of fixed words is exactly what regex is reliable at; it's pulling an
-// arbitrary, variable-length company name out of noisy speech-to-text where
-// regex kept breaking.
-function detectCommand(transcript: string): { sendTelegram: boolean } | null {
+// Detects the opening trigger only ("tailor/ready the resume...") — company
+// name is never expected here anymore, it's asked for as a separate turn.
+export function detectCompanyResumeTrigger(transcript: string): { sendTelegram: boolean } | null {
   const normalized = transcript.trim().toLowerCase();
   // Let the "score the link I just copied" flow handle these instead —
-  // it also matches /\btailor\b/, and a clipboard command never mentions
-  // a company by name for this parser to extract anyway.
+  // it also matches /\btailor\b/.
   if (/\b(clipboard|copied)\b/.test(normalized)) return null;
   if (!TRIGGER_WORDS.test(normalized) || !/\bresume\b/.test(normalized)) return null;
   return { sendTelegram: DELIVER_WORDS.test(normalized) };
 }
 
-const FILLER_PATTERNS: RegExp[] = [
-  /\b(tailor|ready|generate|prepare)\b/g,
-  /\bthe resume\b/g,
-  /\bresume\b/g,
-  /\bfor\b/g,
-  /\band send (it|that)?( ?to)?( my)?( telegram| linkedin)?( channel)?\b/g,
-  /\bsend (it|that)?( ?to)?( my)?( telegram| linkedin)?( channel)?\b/g,
-  /\btelegram( channel)?\b/g,
-  /\blinkedin( channel)?\b/g,
-  /\bplease\b/g,
-  /\bnow\b/g,
-  /\bright away\b/g,
-];
+const WILDCARD_ANSWERS = new Set([
+  "any",
+  "anywhere",
+  "anything",
+  "whatever",
+  "skip",
+  "none",
+  "no preference",
+  "not sure",
+  "doesn't matter",
+  "does not matter",
+]);
+
+const LEADING_FILLER = /^(it'?s|that'?s|um+h?|the company is|the role is|the location is|in)\s+/;
+
+// Cleans one isolated slot answer — a much smaller job than the old
+// full-sentence extraction, since there's no surrounding command phrasing
+// to strip here, just an occasional filler word at the very front. Returns
+// null for a wildcard ("any", "doesn't matter") — that slot is then left
+// unconstrained rather than searched on literally.
+export function cleanSlotAnswer(transcript: string): string | null {
+  const normalized = transcript.trim().toLowerCase().replace(LEADING_FILLER, "").trim();
+  if (!normalized || WILDCARD_ANSWERS.has(normalized)) return null;
+  return normalized;
+}
 
 // Single leftover glue words speech-to-text tends to mishear a nearby word
-// into (e.g. "ready THE resume" heard as "ready TO resume" leaves "to"
-// stuck to the front of the extracted company) — stripped as individual
-// words on top of the phrase-level FILLER_PATTERNS above, which only match
-// exact multi-word phrasing and miss this kind of one-off substitution.
+// into — stripped so a bare stopword can never be used as its own search
+// term (an "ilike '%to%'" search is far too broad and once surfaced a
+// wrong job live).
 const STOPWORDS = new Set(["to", "the", "a", "an", "it", "that", "of", "and", "my"]);
 
-// Local fallback only — used when the Gemini-backed extraction below fails
-// outright (no API key, network down). Regex pattern-matching a specific
-// phrase shape is inherently brittle against real speech-to-text noise;
-// this exists so the feature degrades instead of breaking entirely, not as
-// the primary path.
-function extractCompanyNameLocally(normalized: string): string | null {
-  let cleaned = normalized;
-  for (const pattern of FILLER_PATTERNS) {
-    cleaned = cleaned.replace(pattern, " ");
-  }
-  const words = cleaned.split(/\s+/).filter((w) => w && !STOPWORDS.has(w));
-  return words.length > 0 ? words.join(" ") : null;
-}
-
-async function extractCompanyNameViaLLM(transcript: string): Promise<string | null> {
-  try {
-    const res = await fetch("/api/assistant/parse-company", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ transcript }),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as { company?: string | null };
-    return typeof data.company === "string" && data.company.trim() ? data.company.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
-export async function parseCompanyResumeCommand(
-  transcript: string,
-): Promise<{ company: string; sendTelegram: boolean } | null> {
-  const gate = detectCommand(transcript);
-  if (!gate) return null;
-
-  const company = (await extractCompanyNameViaLLM(transcript)) ?? extractCompanyNameLocally(transcript.trim().toLowerCase());
-  if (!company) return null;
-  return { company, sendTelegram: gate.sendTelegram };
-}
-
-async function searchJobs(search: string): Promise<DashboardJob[]> {
-  const query = new URLSearchParams({ search, limit: "5" }).toString();
+async function searchJobs(search: string, limit = 20): Promise<DashboardJob[]> {
+  const query = new URLSearchParams({ search, limit: String(limit) }).toString();
   const res = await fetch(`/api/dashboard/jobs?${query}`);
   if (!res.ok) return [];
   const data = (await res.json()) as { jobs?: DashboardJob[] };
   return data.jobs ?? [];
 }
 
-export async function findJobByCompany(company: string): Promise<DashboardJob | null> {
+async function searchJobsByCompany(company: string): Promise<DashboardJob[]> {
   const words = company.split(" ").filter(Boolean);
-  // Speech-to-text splits one-word company names into two ("Robinhood"
-  // heard as "Robin Hood") often enough that the plain search misses a
-  // real, visible-on-the-dashboard job entirely — the DB's `search` param
-  // does a literal substring ilike, so "robin hood" never matches
-  // "Robinhood". Try the transcript as heard first, then the words mashed
-  // together with no space, then just the first word, stopping at the
-  // first attempt that actually finds something.
-  // A bare stopword (a leftover glue word the local regex fallback above
-  // failed to strip) is too broad to search on at all — "%to%" would match
-  // almost anything — so it's excluded as a single-word candidate rather
-  // than risk surfacing a wrong job with high confidence, the exact
-  // live-reproduced bug this guards against.
   const firstWordCandidate = words[0] && !STOPWORDS.has(words[0]) ? words[0] : null;
-  const candidates = Array.from(new Set([company, words.join(""), firstWordCandidate].filter((c): c is string => !!c)));
+  // Speech-to-text splits one-word company names into two ("Robinhood"
+  // heard as "Robin Hood") often enough that a plain search misses a real,
+  // visible-on-the-dashboard job entirely — try the answer as heard, then
+  // the words mashed together, then just the first word, stopping at the
+  // first attempt that actually finds something.
+  const candidates = Array.from(
+    new Set([company, words.join(""), firstWordCandidate].filter((c): c is string => !!c)),
+  );
   for (const candidate of candidates) {
     const jobs = await searchJobs(candidate);
-    // Jobs come back newest-first; prefer one with an apply_url (should be
-    // all of them, but link-resume needs it to do anything).
-    const match = jobs.find((j) => !!j.apply_url);
-    if (match) return match;
+    if (jobs.length > 0) return jobs;
+  }
+  return [];
+}
+
+// Narrows a company's jobs down by role/location when either was given
+// (both optional — a wildcard answer clears that constraint): prefers a
+// job matching both, then either one alone, then falls back to just the
+// company if nothing narrows further, rather than finding nothing at all
+// over an unmet secondary constraint.
+export async function findJobByDetails(
+  company: string,
+  role: string | null,
+  place: string | null,
+): Promise<DashboardJob | null> {
+  const jobs = (await searchJobsByCompany(company)).filter((j) => !!j.apply_url);
+  if (jobs.length === 0) return null;
+
+  const roleWords = role?.split(/\s+/).filter(Boolean) ?? [];
+  const placeWords = place?.split(/\s+/).filter(Boolean) ?? [];
+  const matchesRole = (j: DashboardJob) => roleWords.some((w) => j.role.toLowerCase().includes(w));
+  const matchesPlace = (j: DashboardJob) => placeWords.some((w) => (j.location ?? "").toLowerCase().includes(w));
+
+  const buckets = [
+    jobs.filter((j) => (roleWords.length === 0 || matchesRole(j)) && (placeWords.length === 0 || matchesPlace(j))),
+    roleWords.length > 0 ? jobs.filter(matchesRole) : [],
+    placeWords.length > 0 ? jobs.filter(matchesPlace) : [],
+    jobs,
+  ];
+  for (const bucket of buckets) {
+    if (bucket.length > 0) return bucket[0];
   }
   return null;
 }

@@ -1,119 +1,131 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { parseCompanyResumeCommand, findJobByCompany, describeCompanyResumeResult } from "./companyResume";
+import {
+  detectCompanyResumeTrigger,
+  cleanSlotAnswer,
+  findJobByDetails,
+  describeCompanyResumeResult,
+} from "./companyResume";
 import type { DashboardJob, LinkResumeRequestStatus } from "@/lib/dashboard/types";
 
-function mockParseCompanyApi(company: string | null) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (url: string) => {
-      if (typeof url === "string" && url.includes("/api/assistant/parse-company")) {
-        return { ok: true, json: async () => ({ company }) };
-      }
-      throw new Error(`unexpected fetch in this test: ${url}`);
-    }),
-  );
-}
+describe("detectCompanyResumeTrigger", () => {
+  it("detects a tailor-only trigger", () => {
+    expect(detectCompanyResumeTrigger("tailor the resume")).toEqual({ sendTelegram: false });
+  });
 
-describe("parseCompanyResumeCommand", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("parses a tailor-only command using the LLM-extracted company", async () => {
-    mockParseCompanyApi("Stripe");
-    expect(await parseCompanyResumeCommand("tailor the resume for Stripe")).toEqual({
-      company: "Stripe",
-      sendTelegram: false,
+  it("detects a ready + telegram trigger", () => {
+    expect(detectCompanyResumeTrigger("ready the resume and send it to my telegram channel")).toEqual({
+      sendTelegram: true,
     });
   });
 
-  it("parses a ready + telegram command", async () => {
-    mockParseCompanyApi("Stripe");
-    expect(await parseCompanyResumeCommand("ready the resume for Stripe and send it to my telegram channel")).toEqual(
-      { company: "Stripe", sendTelegram: true },
-    );
+  it("treats 'linkedin' as meaning telegram", () => {
+    expect(detectCompanyResumeTrigger("ready the resume and send it to my linkedin")).toEqual({ sendTelegram: true });
   });
 
-  it("treats 'linkedin' in a delivery phrase as meaning telegram", async () => {
-    mockParseCompanyApi("Unity");
-    const result = await parseCompanyResumeCommand("ready the resume for Unity and send it to my linkedin");
-    expect(result).toEqual({ company: "Unity", sendTelegram: true });
+  it("defers to the clipboard-link flow when the transcript mentions clipboard/copied", () => {
+    expect(detectCompanyResumeTrigger("tailor the resume from the link I just copied")).toBeNull();
   });
 
-  it("defers to the clipboard-link flow when the transcript mentions clipboard/copied", async () => {
-    // Rejected by the synchronous gate before any fetch happens — no mock needed.
-    expect(await parseCompanyResumeCommand("tailor the resume from the link I just copied")).toBeNull();
+  it("returns null without the word 'resume'", () => {
+    expect(detectCompanyResumeTrigger("tailor Stripe")).toBeNull();
   });
 
-  it("returns null without the word 'resume'", async () => {
-    expect(await parseCompanyResumeCommand("tailor Stripe")).toBeNull();
-  });
-
-  it("returns null for an unrelated question", async () => {
-    expect(await parseCompanyResumeCommand("what's the weather")).toBeNull();
-  });
-
-  it("falls back to local extraction when the LLM call fails", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false })));
-    expect(await parseCompanyResumeCommand("tailor the resume for Stripe")).toEqual({
-      company: "stripe",
-      sendTelegram: false,
-    });
-  });
-
-  it("real bug: strips a stray glue word ('ready TO resume' misheard from 'ready THE resume') via the local fallback", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("network down");
-      }),
-    );
-    const result = await parseCompanyResumeCommand("ready to resume for skyworks and send it to my telegram channel");
-    expect(result).toEqual({ company: "skyworks", sendTelegram: true });
+  it("returns null for an unrelated question", () => {
+    expect(detectCompanyResumeTrigger("what's the weather")).toBeNull();
   });
 });
 
-describe("findJobByCompany", () => {
+describe("cleanSlotAnswer", () => {
+  it("trims and lowercases a plain answer", () => {
+    expect(cleanSlotAnswer("Skyworks")).toBe("skyworks");
+  });
+
+  it("strips a leading filler word", () => {
+    expect(cleanSlotAnswer("it's Skyworks")).toBe("skyworks");
+    expect(cleanSlotAnswer("the role is Software Engineer")).toBe("software engineer");
+  });
+
+  it("returns null for a wildcard answer", () => {
+    expect(cleanSlotAnswer("any")).toBeNull();
+    expect(cleanSlotAnswer("doesn't matter")).toBeNull();
+    expect(cleanSlotAnswer("Whatever")).toBeNull();
+  });
+
+  it("returns null for an empty answer", () => {
+    expect(cleanSlotAnswer("   ")).toBeNull();
+  });
+});
+
+describe("findJobByDetails", () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it("returns the first job with an apply_url", async () => {
-    const job = { id: 1, company: "Stripe", apply_url: "https://stripe.com/jobs/1" } as DashboardJob;
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ jobs: [job] }) })));
-    expect(await findJobByCompany("stripe")).toEqual(job);
+  function mockJobsSearch(byQuery: Record<string, DashboardJob[]>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const search = new URL(url, "http://x").searchParams.get("search") ?? "";
+        return { ok: true, json: async () => ({ jobs: byQuery[search] ?? [] }) };
+      }),
+    );
+  }
+
+  const swe: DashboardJob = {
+    id: 1,
+    company: "Skyworks",
+    role: "Software Engineer",
+    location: "Irvine, CA",
+    apply_url: "https://skyworks.com/jobs/1",
+  } as DashboardJob;
+  const aiIntern: DashboardJob = {
+    id: 2,
+    company: "Skyworks",
+    role: "AI/ML Summer Intern",
+    location: "Irvine, CA",
+    apply_url: "https://skyworks.com/jobs/2",
+  } as DashboardJob;
+  const remoteRole: DashboardJob = {
+    id: 3,
+    company: "Skyworks",
+    role: "Data Analyst",
+    location: "Remote",
+    apply_url: "https://skyworks.com/jobs/3",
+  } as DashboardJob;
+
+  it("picks the job matching both role and location when all three are given", async () => {
+    mockJobsSearch({ skyworks: [swe, aiIntern, remoteRole] });
+    const result = await findJobByDetails("skyworks", "intern", "irvine");
+    expect(result).toEqual(aiIntern);
   });
 
-  it("returns null when nothing matches", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ jobs: [] }) })));
-    expect(await findJobByCompany("nowhere")).toBeNull();
+  it("falls back to matching just the role when location doesn't narrow further", async () => {
+    mockJobsSearch({ skyworks: [swe, aiIntern, remoteRole] });
+    const result = await findJobByDetails("skyworks", "data analyst", "nowhere real");
+    expect(result).toEqual(remoteRole);
   });
 
-  it("returns null on a failed fetch", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false })));
-    expect(await findJobByCompany("stripe")).toBeNull();
+  it("ignores a null (wildcard) role/location and falls back to the first company match", async () => {
+    mockJobsSearch({ skyworks: [swe, aiIntern, remoteRole] });
+    const result = await findJobByDetails("skyworks", null, null);
+    expect(result).toEqual(swe);
   });
 
   it("falls back to the words mashed together when speech-to-text splits a one-word company", async () => {
-    // Real bug: "ready the resume for Robin Hood" heard as two words, but
-    // the DB has "Robinhood" (no space) — the first search (for "robin
-    // hood") finds nothing, so it must retry with "robinhood".
-    const job = { id: 1, company: "Robinhood", apply_url: "https://robinhood.com/jobs/1" } as DashboardJob;
-    const fetchMock = vi.fn(async (url: string) => {
-      const search = new URL(url, "http://x").searchParams.get("search");
-      return { ok: true, json: async () => ({ jobs: search === "robinhood" ? [job] : [] }) };
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    expect(await findJobByCompany("robin hood")).toEqual(job);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const job = { id: 4, company: "Robinhood", apply_url: "https://robinhood.com/jobs/1" } as DashboardJob;
+    mockJobsSearch({ "robin hood": [], robinhood: [job] });
+    const result = await findJobByDetails("robin hood", null, null);
+    expect(result).toEqual(job);
   });
 
-  it("falls back to just the first word as a last resort", async () => {
-    const job = { id: 2, company: "Unity", apply_url: "https://unity.com/jobs/2" } as DashboardJob;
-    const fetchMock = vi.fn(async (url: string) => {
-      const search = new URL(url, "http://x").searchParams.get("search");
-      return { ok: true, json: async () => ({ jobs: search === "unity" ? [job] : [] }) };
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    expect(await findJobByCompany("unity software")).toEqual(job);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+  it("returns null when nothing matches at all", async () => {
+    mockJobsSearch({});
+    expect(await findJobByDetails("nowhere", null, null)).toBeNull();
+  });
+
+  it("excludes jobs without an apply_url", async () => {
+    const noUrl = { id: 5, company: "Skyworks", role: "X", location: "Y", apply_url: null } as DashboardJob;
+    mockJobsSearch({ skyworks: [noUrl] });
+    expect(await findJobByDetails("skyworks", null, null)).toBeNull();
   });
 });
 
@@ -146,8 +158,8 @@ describe("describeCompanyResumeResult", () => {
   });
 
   it("speaks the error when the request failed", () => {
-    expect(describeCompanyResumeResult({ ...base, status: "failed", error: "no resume for that domain" }, false, "Stripe")).toBe(
-      "no resume for that domain",
-    );
+    expect(
+      describeCompanyResumeResult({ ...base, status: "failed", error: "no resume for that domain" }, false, "Stripe"),
+    ).toBe("no resume for that domain");
   });
 });

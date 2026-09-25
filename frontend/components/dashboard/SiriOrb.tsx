@@ -26,7 +26,12 @@ import {
   pollLinkResumeOnce,
   describeLinkResumeResult,
 } from "@/lib/voice/clipboardLink";
-import { parseCompanyResumeCommand, findJobByCompany, describeCompanyResumeResult } from "@/lib/voice/companyResume";
+import {
+  detectCompanyResumeTrigger,
+  cleanSlotAnswer,
+  findJobByDetails,
+  describeCompanyResumeResult,
+} from "@/lib/voice/companyResume";
 import { CaptionDisplay } from "@/components/dashboard/CaptionDisplay";
 import { HologramOrb } from "@/components/dashboard/HologramOrb";
 import { EveIntro } from "@/components/dashboard/EveIntro";
@@ -118,6 +123,17 @@ export function SiriOrb({
   // (which can still be mid-flight awaiting the briefing fetch) from
   // starting the greeting speech after the user already asked to skip it.
   const introSkippedRef = useRef(false);
+  // Drives the guided "tailor/ready the resume" Q&A — company, then role,
+  // then location, one short answer at a time, rather than trying to parse
+  // all three out of one spoken sentence (which broke differently on real
+  // speech-to-text noise each time) and to disambiguate a company with
+  // several open roles. Same "next transcript answers this question" shape
+  // as pendingConfirmRef, just three steps instead of one.
+  type PendingCompanyResume =
+    | { step: "company"; sendTelegram: boolean }
+    | { step: "role"; sendTelegram: boolean; company: string }
+    | { step: "place"; sendTelegram: boolean; company: string; role: string | null };
+  const pendingCompanyResumeRef = useRef<PendingCompanyResume | null>(null);
 
   function isLikelySelfEcho(transcript: string): boolean {
     const spoken = lastSpokenTextRef.current.toLowerCase();
@@ -237,6 +253,16 @@ export function SiriOrb({
         // dispatch below, so an unrelated follow-up isn't stuck.
       }
 
+      // Mid-Q&A for the guided "tailor/ready the resume" flow — every
+      // transcript while this is set answers the current step, never
+      // falls through to normal dispatch (unlike the yes/no confirm above,
+      // there's no sensible "neither" case for an open-ended answer like a
+      // company/role/location name).
+      if (pendingCompanyResumeRef.current) {
+        await handleCompanyResumeSlotAnswer(transcript);
+        return;
+      }
+
       // Ordinal checks are gated on a list actually having been read aloud
       // — "first"/"second"/"third" are common English words, so without
       // this guard an unrelated question ("what's the second largest
@@ -284,18 +310,12 @@ export function SiriOrb({
       }
 
       // Checked ahead of the clipboard-link command below since both can
-      // match on the bare word "tailor" — a company-name command always
-      // wins when it successfully extracts a company, since a clipboard
-      // command never names one. This now makes a Gemini call to pull the
-      // company name out reliably (see companyResume.ts), so it's no
-      // longer instant — reflect that in the orb rather than looking
-      // frozen; every branch below this one re-sets state itself, so
-      // setting it here even for a transcript that turns out not to be a
-      // resume command is harmless.
-      setState("thinking");
-      const companyResumeCommand = await parseCompanyResumeCommand(transcript);
-      if (companyResumeCommand) {
-        await handleCompanyResumeCommand(companyResumeCommand.company, companyResumeCommand.sendTelegram);
+      // match on the bare word "tailor" — opening the guided Q&A always
+      // wins, since a clipboard command never says "resume".
+      const resumeTrigger = detectCompanyResumeTrigger(transcript);
+      if (resumeTrigger) {
+        pendingCompanyResumeRef.current = { step: "company", sendTelegram: resumeTrigger.sendTelegram };
+        speakText("Sure — what's the company name?");
         return;
       }
 
@@ -484,12 +504,51 @@ export function SiriOrb({
   // run) and fires the same on-demand pipeline the paste-a-link box uses,
   // with sendTelegram controlling whether it also delivers to Telegram or
   // just lands tailored in the pending dashboard.
-  async function handleCompanyResumeCommand(company: string, sendTelegram: boolean) {
+  // Advances the guided company/role/location Q&A one turn at a time —
+  // see pendingCompanyResumeRef's declaration for why this is three short
+  // answers instead of one sentence.
+  async function handleCompanyResumeSlotAnswer(transcript: string) {
+    const pending = pendingCompanyResumeRef.current;
+    if (!pending) return;
+    const answer = cleanSlotAnswer(transcript);
+
+    if (pending.step === "company") {
+      if (!answer) {
+        speakText("I need a company name to go on — what's the company?");
+        return;
+      }
+      pendingCompanyResumeRef.current = { step: "role", sendTelegram: pending.sendTelegram, company: answer };
+      speakText("Got it. What's the role?");
+      return;
+    }
+
+    if (pending.step === "role") {
+      pendingCompanyResumeRef.current = {
+        step: "place",
+        sendTelegram: pending.sendTelegram,
+        company: pending.company,
+        role: answer,
+      };
+      speakText("And which location?");
+      return;
+    }
+
+    // pending.step === "place" — all three collected, go do the work.
+    pendingCompanyResumeRef.current = null;
+    await handleCompanyResumeCommand(pending.company, pending.role, answer, pending.sendTelegram);
+  }
+
+  async function handleCompanyResumeCommand(
+    company: string,
+    role: string | null,
+    place: string | null,
+    sendTelegram: boolean,
+  ) {
     setState("thinking");
     try {
-      const job = await findJobByCompany(company);
+      const job = await findJobByDetails(company, role, place);
       if (!job || !job.apply_url) {
-        speakText(`I couldn't find a job from ${company} in the pipeline yet.`);
+        speakText(`I couldn't find a matching job at ${company} in the pipeline yet.`);
         return;
       }
       const result = await submitLink(job.apply_url, sendTelegram);
@@ -523,7 +582,7 @@ export function SiriOrb({
         }
       }, 3000);
     } catch (exc) {
-      // findJobByCompany/submitLink throwing (a network error, a bad
+      // findJobByDetails/submitLink throwing (a network error, a bad
       // response) used to leave `state` stuck on "thinking" forever with
       // nothing spoken and nothing in the console — a real, reproduced gap
       // where the orb looked like it had simply stopped taking commands.
