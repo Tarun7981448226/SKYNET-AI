@@ -25,12 +25,12 @@ export function extractUrl(text: string): string | null {
 
 export type SubmitLinkResult = { requestId: number } | { error: string };
 
-export async function submitLink(url: string): Promise<SubmitLinkResult> {
+export async function submitLink(url: string, sendTelegram: boolean = true): Promise<SubmitLinkResult> {
   try {
     const res = await fetch("/api/dashboard/link-resume", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, sendTelegram }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {

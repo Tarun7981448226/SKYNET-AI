@@ -21,6 +21,12 @@ export async function POST(request: NextRequest) {
   if (!url || !/^https?:\/\//i.test(url)) {
     return NextResponse.json({ error: "url must be a valid http(s) link" }, { status: 400 });
   }
+  // Defaults to true so the manual paste-a-link box and "score the link I
+  // just copied" keep their existing always-deliver behavior; the voice
+  // "tailor the resume for <company>" command is the one caller that
+  // passes false, since it only wants the job tailored into the pending
+  // dashboard, not pushed to Telegram.
+  const sendTelegram = body.sendTelegram !== false;
 
   const sql = getSql();
   let requestId: number;
@@ -40,7 +46,7 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    await dispatchLinkResumeWorkflow(url, requestId);
+    await dispatchLinkResumeWorkflow(url, requestId, sendTelegram);
   } catch (exc) {
     // The row stays "pending" forever otherwise — surface the dispatch
     // failure into the same status field the dashboard is about to poll,

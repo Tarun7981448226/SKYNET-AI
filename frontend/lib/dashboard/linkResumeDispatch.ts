@@ -5,7 +5,11 @@
 // the `actions:write` (repo) scope, since a workflow can't dispatch itself.
 export class DispatchError extends Error {}
 
-export async function dispatchLinkResumeWorkflow(url: string, requestId: number): Promise<void> {
+export async function dispatchLinkResumeWorkflow(
+  url: string,
+  requestId: number,
+  sendTelegram: boolean = true,
+): Promise<void> {
   const token = process.env.GITHUB_DISPATCH_TOKEN;
   const repository = process.env.GITHUB_REPOSITORY; // "owner/repo"
   if (!token || !repository) {
@@ -21,7 +25,7 @@ export async function dispatchLinkResumeWorkflow(url: string, requestId: number)
     },
     body: JSON.stringify({
       ref: "main",
-      inputs: { url, request_id: String(requestId) },
+      inputs: { url, request_id: String(requestId), send_telegram: String(sendTelegram) },
     }),
   });
 

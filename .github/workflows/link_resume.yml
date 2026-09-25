@@ -15,6 +15,10 @@ on:
       request_id:
         description: "link_resume_requests.id to update with the result"
         required: true
+      send_telegram:
+        description: "Send the tailored resume to Telegram once it's ready ('false' to just tailor + upload)"
+        required: false
+        default: "true"
 
 env:
   DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -67,4 +71,6 @@ jobs:
           RESUME_SWE_MD: ${{ secrets.RESUME_SWE_MD }}
 
       - name: Process the pasted link
-        run: python -m backend.cli link-resume --url "${{ inputs.url }}" --request-id "${{ inputs.request_id }}"
+        run: >
+          python -m backend.cli link-resume --url "${{ inputs.url }}" --request-id "${{ inputs.request_id }}"
+          ${{ inputs.send_telegram == 'false' && '--no-telegram' || '' }}

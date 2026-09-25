@@ -731,7 +731,7 @@ def _fail_link_request(session, request_row: LinkResumeRequest | None, message: 
         session.commit()
 
 
-def run_link_resume(url: str, request_id: int | None = None) -> dict:
+def run_link_resume(url: str, request_id: int | None = None, send_telegram: bool = True) -> dict:
     """On-demand pipeline for one job URL Tarun pastes into the dashboard
     (frontend/app/api/dashboard/link-resume) instead of waiting for a
     source adapter to find it: fetch the page -> parse it with the same JD
@@ -744,7 +744,13 @@ def run_link_resume(url: str, request_id: int | None = None) -> dict:
     request_id, when given, is a LinkResumeRequest row's id that the
     dashboard already inserted (status="pending") and is polling — every
     exit path here updates it so the UI has something real to show,
-    success or failure, instead of hanging forever."""
+    success or failure, instead of hanging forever.
+
+    send_telegram=False skips the delivery step entirely (used by the
+    dashboard's voice "tailor the resume for <company>" command, which
+    only wants the job tailored and sitting in the pending dashboard —
+    not pushed to Telegram like the "ready + send" voice command and the
+    manual paste-a-link box both do by default)."""
     with SessionLocal() as session:
         request_row = session.get(LinkResumeRequest, request_id) if request_id else None
 
@@ -867,21 +873,25 @@ def run_link_resume(url: str, request_id: int | None = None) -> dict:
 
         notify_resume_ready(job.company, job.role, score.score, drive_link)
 
-        # Delivery is the point of this whole command, but a failure here
-        # (not configured yet, network hiccup) shouldn't sink an otherwise-
-        # successful request: the resume is real and reachable via
-        # drive_link either way. Still Telegram under the hood right now
-        # (see the TEMPORARY import above) — the whatsapp_status name is
-        # the real DB column (frontend/backend/model all reference it) and
-        # reverts to meaning WhatsApp again once that swap goes back.
-        whatsapp_status = "not configured"
-        try:
-            caption = f"{job.company} — {job.role} (fit score {score.score})"
-            send_resume_document(pdf_path, caption)
-            whatsapp_status = "sent"
-        except TelegramDeliveryError as exc:
-            whatsapp_status = f"failed: {exc}"
-            print(f"  Telegram send failed for job {job.id}: {exc}")
+        # Delivery is the point of this whole command *when send_telegram is
+        # true*, but a failure here (not configured yet, network hiccup)
+        # shouldn't sink an otherwise-successful request: the resume is
+        # real and reachable via drive_link either way. Still Telegram
+        # under the hood right now (see the TEMPORARY import above) — the
+        # whatsapp_status name is the real DB column (frontend/backend/
+        # model all reference it) and reverts to meaning WhatsApp again
+        # once that swap goes back.
+        if send_telegram:
+            whatsapp_status = "not configured"
+            try:
+                caption = f"{job.company} — {job.role} (fit score {score.score})"
+                send_resume_document(pdf_path, caption)
+                whatsapp_status = "sent"
+            except TelegramDeliveryError as exc:
+                whatsapp_status = f"failed: {exc}"
+                print(f"  Telegram send failed for job {job.id}: {exc}")
+        else:
+            whatsapp_status = "skipped"
 
         if request_row is not None:
             request_row.status = "done"
@@ -906,7 +916,7 @@ def run_link_resume(url: str, request_id: int | None = None) -> dict:
 
 
 def cmd_link_resume(args: argparse.Namespace) -> None:
-    result = run_link_resume(args.url, request_id=args.request_id)
+    result = run_link_resume(args.url, request_id=args.request_id, send_telegram=not args.no_telegram)
     print(result)
 
 
@@ -975,6 +985,11 @@ def main() -> None:
     link_resume_parser.add_argument("--url", type=str, required=True)
     link_resume_parser.add_argument(
         "--request-id", type=int, default=None, help="link_resume_requests.id to update with the result"
+    )
+    link_resume_parser.add_argument(
+        "--no-telegram",
+        action="store_true",
+        help="tailor/render/upload only — skip the Telegram delivery step",
     )
     link_resume_parser.set_defaults(func=cmd_link_resume)
 

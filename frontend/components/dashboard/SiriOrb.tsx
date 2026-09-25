@@ -26,6 +26,7 @@ import {
   pollLinkResumeOnce,
   describeLinkResumeResult,
 } from "@/lib/voice/clipboardLink";
+import { parseCompanyResumeCommand, findJobByCompany, describeCompanyResumeResult } from "@/lib/voice/companyResume";
 import { CaptionDisplay } from "@/components/dashboard/CaptionDisplay";
 import { HologramOrb } from "@/components/dashboard/HologramOrb";
 import { EveIntro } from "@/components/dashboard/EveIntro";
@@ -278,6 +279,16 @@ export function SiriOrb({
         return;
       }
 
+      // Checked ahead of the clipboard-link command below since both can
+      // match on the bare word "tailor" — a company-name command always
+      // wins when it successfully extracts a company, since a clipboard
+      // command never names one.
+      const companyResumeCommand = parseCompanyResumeCommand(transcript);
+      if (companyResumeCommand) {
+        await handleCompanyResumeCommand(companyResumeCommand.company, companyResumeCommand.sendTelegram);
+        return;
+      }
+
       if (isScoreClipboardCommand(transcript)) {
         await handleScoreClipboardCommand();
         return;
@@ -417,6 +428,41 @@ export function SiriOrb({
         if (linkPollRef.current) clearInterval(linkPollRef.current);
         linkPollRef.current = null;
         speakText(describeLinkResumeResult(status));
+      }
+    }, 3000);
+  }
+
+  // "Tailor the resume for Stripe" / "ready the resume for Stripe and send
+  // it to my telegram" — looks the job up by company name (must already be
+  // on the dashboard, ingested by a source adapter or a prior link-resume
+  // run) and fires the same on-demand pipeline the paste-a-link box uses,
+  // with sendTelegram controlling whether it also delivers to Telegram or
+  // just lands tailored in the pending dashboard.
+  async function handleCompanyResumeCommand(company: string, sendTelegram: boolean) {
+    setState("thinking");
+    const job = await findJobByCompany(company);
+    if (!job || !job.apply_url) {
+      speakText(`I couldn't find a job from ${company} in the pipeline yet.`);
+      return;
+    }
+    const result = await submitLink(job.apply_url, sendTelegram);
+    if ("error" in result) {
+      speakText(result.error);
+      return;
+    }
+    const requestId = result.requestId;
+    speakText(
+      sendTelegram
+        ? `Found it — tailoring the ${job.company} resume and sending it to your Telegram now.`
+        : `Found it — tailoring the ${job.company} resume now.`,
+    );
+    if (linkPollRef.current) clearInterval(linkPollRef.current);
+    linkPollRef.current = setInterval(async () => {
+      const status = await pollLinkResumeOnce(requestId);
+      if (status && status.status !== "pending") {
+        if (linkPollRef.current) clearInterval(linkPollRef.current);
+        linkPollRef.current = null;
+        speakText(describeCompanyResumeResult(status, sendTelegram, job.company));
       }
     }, 3000);
   }
