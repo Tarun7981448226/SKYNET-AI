@@ -480,31 +480,50 @@ export function SiriOrb({
   // just lands tailored in the pending dashboard.
   async function handleCompanyResumeCommand(company: string, sendTelegram: boolean) {
     setState("thinking");
-    const job = await findJobByCompany(company);
-    if (!job || !job.apply_url) {
-      speakText(`I couldn't find a job from ${company} in the pipeline yet.`);
-      return;
-    }
-    const result = await submitLink(job.apply_url, sendTelegram);
-    if ("error" in result) {
-      speakText(result.error);
-      return;
-    }
-    const requestId = result.requestId;
-    speakText(
-      sendTelegram
-        ? `Found it — tailoring the ${job.company} resume and sending it to your Telegram now.`
-        : `Found it — tailoring the ${job.company} resume now.`,
-    );
-    if (linkPollRef.current) clearInterval(linkPollRef.current);
-    linkPollRef.current = setInterval(async () => {
-      const status = await pollLinkResumeOnce(requestId);
-      if (status && status.status !== "pending") {
-        if (linkPollRef.current) clearInterval(linkPollRef.current);
-        linkPollRef.current = null;
-        speakText(describeCompanyResumeResult(status, sendTelegram, job.company));
+    try {
+      const job = await findJobByCompany(company);
+      if (!job || !job.apply_url) {
+        speakText(`I couldn't find a job from ${company} in the pipeline yet.`);
+        return;
       }
-    }, 3000);
+      const result = await submitLink(job.apply_url, sendTelegram);
+      if ("error" in result) {
+        speakText(result.error);
+        return;
+      }
+      const requestId = result.requestId;
+      speakText(
+        sendTelegram
+          ? `Found it — tailoring the ${job.company} resume and sending it to your Telegram now.`
+          : `Found it — tailoring the ${job.company} resume now.`,
+      );
+      if (linkPollRef.current) clearInterval(linkPollRef.current);
+      linkPollRef.current = setInterval(async () => {
+        try {
+          const status = await pollLinkResumeOnce(requestId);
+          if (status && status.status !== "pending") {
+            if (linkPollRef.current) clearInterval(linkPollRef.current);
+            linkPollRef.current = null;
+            speakText(describeCompanyResumeResult(status, sendTelegram, job.company));
+          }
+        } catch (exc) {
+          // A poll tick throwing (network blip) shouldn't leave this
+          // interval running forever with no way to stop it, nor should
+          // it crash silently — same reasoning as the outer catch below.
+          console.error("link-resume poll failed:", exc);
+          if (linkPollRef.current) clearInterval(linkPollRef.current);
+          linkPollRef.current = null;
+          speakText("Lost track of that request — check the dashboard for its status.");
+        }
+      }, 3000);
+    } catch (exc) {
+      // findJobByCompany/submitLink throwing (a network error, a bad
+      // response) used to leave `state` stuck on "thinking" forever with
+      // nothing spoken and nothing in the console — a real, reproduced gap
+      // where the orb looked like it had simply stopped taking commands.
+      console.error("company resume command failed:", exc);
+      speakText("Something went wrong tailoring that resume — try again in a moment.");
+    }
   }
 
   // Shared by both the single-referent ("mark that applied") and the
