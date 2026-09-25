@@ -754,75 +754,94 @@ def run_link_resume(url: str, request_id: int | None = None, send_telegram: bool
     with SessionLocal() as session:
         request_row = session.get(LinkResumeRequest, request_id) if request_id else None
 
-        try:
-            raw_text = fetch_job_page_text(url)
-        except LinkFetchError as exc:
-            _fail_link_request(session, request_row, f"couldn't read that page: {exc}")
-            return {"status": "failed", "error": str(exc)}
+        # An already-ingested job (any source adapter, not just this
+        # command's own link_paste) can share this exact apply_url — the
+        # dashboard's voice "tailor the resume for <company>" command in
+        # particular always starts from an *existing* job's own apply_url,
+        # not a fresh link someone just pasted. Re-fetching that URL is
+        # often actively wrong there: a job sourced from a Gmail LinkedIn
+        # alert has a LinkedIn apply_url that needs a logged-in session to
+        # view at all (this pipeline is deliberately never allowed to
+        # automate a LinkedIn login/scrape — see CLAUDE.md's security
+        # rules), so fetching it anonymously hits a login wall and the JD
+        # parser correctly reports "not a job posting" — live-reproduced,
+        # twice — even though the real job data is already sitting in this
+        # exact row, since gmail_linkedin_alerts.py parsed it out of the
+        # alert *email* itself, never the LinkedIn page. Skip the
+        # fetch/parse round trip entirely when the row already exists.
+        job = session.query(Job).filter(Job.apply_url == url).first()
 
-        try:
-            parse_result = parse_raw_post(raw_text, url=url)
-        except ParseError as exc:
-            _fail_link_request(session, request_row, f"couldn't understand that job posting: {exc}")
-            return {"status": "failed", "error": str(exc)}
+        if job is None:
+            try:
+                raw_text = fetch_job_page_text(url)
+            except LinkFetchError as exc:
+                _fail_link_request(session, request_row, f"couldn't read that page: {exc}")
+                return {"status": "failed", "error": str(exc)}
 
-        if not parse_result.is_job or parse_result.job is None:
-            _fail_link_request(session, request_row, "that link doesn't look like a job posting")
-            return {"status": "failed", "error": "not a job posting"}
+            try:
+                parse_result = parse_raw_post(raw_text, url=url)
+            except ParseError as exc:
+                _fail_link_request(session, request_row, f"couldn't understand that job posting: {exc}")
+                return {"status": "failed", "error": str(exc)}
 
-        job_fields = parse_result.job
+            if not parse_result.is_job or parse_result.job is None:
+                _fail_link_request(session, request_row, "that link doesn't look like a job posting")
+                return {"status": "failed", "error": "not a job posting"}
+
+            job_fields = parse_result.job
+
+            # jobs has *two* unique constraints (content_hash, and apply_url
+            # where not null) — a source adapter can already have this exact
+            # posting under a content_hash that doesn't match ours (its own JD
+            # parse of the same page can land on slightly different company/
+            # role/location text than link_paste's), which used to slip past
+            # the content_hash-only lookup below and crash the whole request on
+            # apply_url's constraint instead. Check both before inserting.
+            content_hash = compute_hash(job_fields.company, job_fields.role, job_fields.location or "")
+            apply_url_value = job_fields.apply_url or url
+            job = (
+                session.query(Job)
+                .filter((Job.content_hash == content_hash) | (Job.apply_url == apply_url_value))
+                .first()
+            )
+            if job is None:
+                job = Job(
+                    company=job_fields.company,
+                    role=job_fields.role,
+                    type=job_fields.type,
+                    location=job_fields.location,
+                    skills=job_fields.skills,
+                    keywords=job_fields.keywords,
+                    visa_notes=job_fields.visa_notes,
+                    domain=job_fields.domain,
+                    apply_url=apply_url_value,
+                    source="link_paste",
+                    content_hash=content_hash,
+                    status="new",
+                )
+                session.add(job)
+                try:
+                    session.commit()
+                except IntegrityError:
+                    # Lost a race with something else inserting the same
+                    # posting between the lookup above and this commit (e.g.
+                    # the hourly pipeline mid-run) — the row's real now, just
+                    # go find it instead of failing an otherwise-good request.
+                    session.rollback()
+                    job = (
+                        session.query(Job)
+                        .filter((Job.content_hash == content_hash) | (Job.apply_url == apply_url_value))
+                        .first()
+                    )
+                    if job is None:
+                        raise
+
         resumes = _load_domain_resumes()
-        resume = resumes.get(job_fields.domain)
+        resume = resumes.get(job.domain)
         if resume is None:
-            message = f"no resume prepared yet for domain '{job_fields.domain}'"
+            message = f"no resume prepared yet for domain '{job.domain}'"
             _fail_link_request(session, request_row, message)
             return {"status": "failed", "error": message}
-
-        # jobs has *two* unique constraints (content_hash, and apply_url
-        # where not null) — a source adapter can already have this exact
-        # posting under a content_hash that doesn't match ours (its own JD
-        # parse of the same page can land on slightly different company/
-        # role/location text than link_paste's), which used to slip past
-        # the content_hash-only lookup below and crash the whole request on
-        # apply_url's constraint instead. Check both before inserting.
-        content_hash = compute_hash(job_fields.company, job_fields.role, job_fields.location or "")
-        apply_url_value = job_fields.apply_url or url
-        job = (
-            session.query(Job)
-            .filter((Job.content_hash == content_hash) | (Job.apply_url == apply_url_value))
-            .first()
-        )
-        if job is None:
-            job = Job(
-                company=job_fields.company,
-                role=job_fields.role,
-                type=job_fields.type,
-                location=job_fields.location,
-                skills=job_fields.skills,
-                keywords=job_fields.keywords,
-                visa_notes=job_fields.visa_notes,
-                domain=job_fields.domain,
-                apply_url=apply_url_value,
-                source="link_paste",
-                content_hash=content_hash,
-                status="new",
-            )
-            session.add(job)
-            try:
-                session.commit()
-            except IntegrityError:
-                # Lost a race with something else inserting the same
-                # posting between the lookup above and this commit (e.g.
-                # the hourly pipeline mid-run) — the row's real now, just
-                # go find it instead of failing an otherwise-good request.
-                session.rollback()
-                job = (
-                    session.query(Job)
-                    .filter((Job.content_hash == content_hash) | (Job.apply_url == apply_url_value))
-                    .first()
-                )
-                if job is None:
-                    raise
 
         try:
             score = score_job(job, resume)

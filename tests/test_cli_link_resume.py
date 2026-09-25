@@ -92,18 +92,21 @@ def test_full_run_sends_whatsapp_and_marks_request_done(sqlite_session_local, tm
         assert request_row.completed_at is not None
 
 
-def test_reuses_existing_job_matched_by_apply_url_not_content_hash(sqlite_session_local, tmp_path):
-    # Simulates the real bug: a source adapter already tracked this exact
-    # URL under its own JD parse (a different company/role/location text
-    # than link_paste's parse of the same page lands on), so content_hash
-    # differs — only apply_url actually matches. Used to crash the whole
-    # request on jobs' apply_url unique constraint instead of reusing the
-    # row.
+def test_reuses_existing_job_matched_by_apply_url_without_refetching(sqlite_session_local, tmp_path):
+    # An apply_url match against an already-ingested job (any source
+    # adapter — this test uses Greenhouse, but the voice "tailor the resume
+    # for <company>" command hits this exact path for a job sourced from a
+    # Gmail LinkedIn alert, whose apply_url can't be fetched anonymously at
+    # all — see run_link_resume's own comment) now skips fetch/parse
+    # entirely and uses the existing row's own already-known fields,
+    # instead of re-deriving them from the page and only using apply_url to
+    # avoid a duplicate-row crash.
     request_id = _create_pending_request(sqlite_session_local, "https://example.com/jobs/1")
     with sqlite_session_local() as session:
         existing = Job(
-            company="Acme Inc.",  # deliberately different text than FAKE_PARSE_RESULT's "Acme"
+            company="Acme Inc.",
             role="Machine Learning Engineer",
+            domain="ai_ml",
             source="greenhouse",
             apply_url="https://example.com/jobs/1",
             content_hash="some-other-hash-from-the-real-pipelines-own-parse",
@@ -114,8 +117,8 @@ def test_reuses_existing_job_matched_by_apply_url_not_content_hash(sqlite_sessio
         existing_id = existing.id
 
     with (
-        patch("app.cli.fetch_job_page_text", return_value="Acme is hiring an ML Engineer"),
-        patch("app.cli.parse_raw_post", return_value=FAKE_PARSE_RESULT),
+        patch("app.cli.fetch_job_page_text") as mock_fetch,
+        patch("app.cli.parse_raw_post") as mock_parse,
         patch("app.cli._load_domain_resumes", return_value={"ai_ml": FAKE_RESUME}),
         patch("app.cli.score_job", side_effect=_fake_score),
         patch("app.cli.tailor_resume", side_effect=_fake_tailor),
@@ -128,6 +131,8 @@ def test_reuses_existing_job_matched_by_apply_url_not_content_hash(sqlite_sessio
 
     assert result["status"] == "done"
     assert result["job_id"] == existing_id
+    mock_fetch.assert_not_called()
+    mock_parse.assert_not_called()
     with sqlite_session_local() as session:
         assert session.query(Job).count() == 1  # reused, not duplicated
 
